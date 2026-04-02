@@ -63,15 +63,22 @@ def init_database():
             price_full REAL DEFAULT 0,
             is_active INTEGER DEFAULT 1,
             created_date TEXT,
-            apk_link TEXT DEFAULT '',
+            apk_file_id TEXT DEFAULT '',
             FOREIGN KEY (folder_id) REFERENCES folders(id)
         )
     ''')
     
+    # Add apk_file_id column if missing (for existing DB)
     cursor.execute("PRAGMA table_info(products)")
     columns = [col[1] for col in cursor.fetchall()]
-    if 'apk_link' not in columns:
-        cursor.execute("ALTER TABLE products ADD COLUMN apk_link TEXT DEFAULT ''")
+    if 'apk_file_id' not in columns:
+        cursor.execute("ALTER TABLE products ADD COLUMN apk_file_id TEXT DEFAULT ''")
+    if 'apk_link' in columns:
+        # Remove old apk_link column if exists
+        try:
+            cursor.execute("ALTER TABLE products DROP COLUMN apk_link")
+        except:
+            pass
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS keys (
@@ -243,7 +250,7 @@ def get_all_products():
     cursor.execute('''
         SELECT p.id, p.name, p.display_name, f.display_name, 
                p.price_1day, p.price_7days, p.price_30days, p.price_full, p.is_active,
-               p.apk_link
+               p.apk_file_id
         FROM products p
         JOIN folders f ON p.folder_id = f.id
         ORDER BY p.created_date DESC
@@ -252,15 +259,15 @@ def get_all_products():
     conn.close()
     return products
 
-def add_product(folder_id, name, display_name, price_1day, price_7days, price_30days, price_full, apk_link=""):
+def add_product(folder_id, name, display_name, price_1day, price_7days, price_30days, price_full):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT INTO products (folder_id, name, display_name, price_1day, price_7days, price_30days, price_full, created_date, apk_link)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products (folder_id, name, display_name, price_1day, price_7days, price_30days, price_full, created_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (folder_id, name, display_name, price_1day, price_7days, price_30days, price_full,
-              datetime.now().strftime('%Y-%m-%d %H:%M:%S'), apk_link))
+              datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
         conn.close()
         return True
@@ -282,10 +289,25 @@ def update_product_price(product_id, duration, price):
     conn.commit()
     conn.close()
 
-def set_product_apk_link(product_id, apk_link):
+def set_product_apk_file(product_id, file_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('UPDATE products SET apk_link = ? WHERE id = ?', (apk_link, product_id))
+    cursor.execute('UPDATE products SET apk_file_id = ? WHERE id = ?', (file_id, product_id))
+    conn.commit()
+    conn.close()
+
+def get_product_apk_file(product_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT apk_file_id FROM products WHERE id = ?', (product_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def delete_product_apk(product_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE products SET apk_file_id = "" WHERE id = ?', (product_id,))
     conn.commit()
     conn.close()
 
@@ -386,13 +408,14 @@ def approve_order(order_id, panel_key):
             WHERE key_value = ?
         ''', (user_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), panel_key))
         conn.commit()
-        cursor.execute('SELECT apk_link FROM products WHERE id = ?', (product_id,))
+        # Get APK file ID if any
+        cursor.execute('SELECT apk_file_id FROM products WHERE id = ?', (product_id,))
         apk_row = cursor.fetchone()
-        apk_link = apk_row[0] if apk_row else ""
+        apk_file_id = apk_row[0] if apk_row else None
         conn.close()
-        return True, user_id, apk_link
+        return True, user_id, apk_file_id
     conn.close()
-    return False, None, ""
+    return False, None, None
 
 def reject_order(order_id):
     conn = sqlite3.connect(DB_FILE)
@@ -755,6 +778,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ Product #{product_id} deleted!")
         await asyncio.sleep(1)
         await show_products_admin(query)
+    elif data.startswith("upload_apk_"):
+        product_id = int(data.replace("upload_apk_", ""))
+        context.user_data['upload_apk_for_product'] = product_id
+        await query.edit_message_text(f"📤 Send the APK file for product ID {product_id}.\n\nPlease upload the APK file as a document.")
+    elif data.startswith("remove_apk_"):
+        product_id = int(data.replace("remove_apk_", ""))
+        delete_product_apk(product_id)
+        await query.edit_message_text(f"✅ APK file removed for product ID {product_id}.")
+        await asyncio.sleep(1)
+        await show_products_admin(query)
 
 async def start_callback(query, user_id):
     user = query.from_user
@@ -892,23 +925,25 @@ async def show_products_admin(query):
     products = get_all_products()
     text = "╔══════════════════════════════╗\n║    💰 MANAGE PRODUCTS 💰    ║\n╚══════════════════════════════╝\n\n"
     for prod in products:
-        prod_id, name, display, folder, p1, p7, p30, pfull, active, apk = prod
+        prod_id, name, display, folder, p1, p7, p30, pfull, active, apk_file = prod
         status = "✅" if active else "❌"
-        apk_display = f"APK: {apk[:50]}{'...' if len(apk)>50 else ''}" if apk else "No APK link"
+        apk_status = "📎 APK uploaded" if apk_file else "❌ No APK"
         text += f"{status} <b>{display}</b> (ID: {prod_id})\n"
         text += f"   └ Folder: {folder}\n"
         text += f"   └ Prices: 1D:₹{p1} | 7D:₹{p7} | 30D:₹{p30} | Full:₹{pfull}\n"
-        text += f"   └ {apk_display}\n\n"
+        text += f"   └ {apk_status}\n\n"
     text += "\n<b>Commands:</b>\n"
-    text += "/addproduct &lt;folder_id&gt; &lt;name&gt; &lt;display&gt; &lt;p1&gt; &lt;p7&gt; &lt;p30&gt; &lt;pfull&gt; &lt;apk_link&gt;\n"
+    text += "/addproduct &lt;folder_id&gt; &lt;name&gt; &lt;display&gt; &lt;p1&gt; &lt;p7&gt; &lt;p30&gt; &lt;pfull&gt;\n"
     text += "/editproduct &lt;id&gt; &lt;duration&gt; &lt;price&gt;\n"
-    text += "/setapk &lt;product_id&gt; &lt;link&gt;\n"
-    text += "/delapk &lt;product_id&gt;\n"
     text += "/delproduct &lt;id&gt;\n\n"
+    text += "<b>APK Management (Click button below):</b>"
     
     keyboard = []
     for prod in products:
         prod_id = prod[0]
+        keyboard.append([InlineKeyboardButton(f"📤 Upload APK for {prod[2]}", callback_data=f"upload_apk_{prod_id}")])
+        if prod[9]:  # if APK exists
+            keyboard.append([InlineKeyboardButton(f"🗑️ Remove APK from {prod[2]}", callback_data=f"remove_apk_{prod_id}")])
         keyboard.append([InlineKeyboardButton(f"🗑️ Delete {prod[2]}", callback_data=f"confirm_del_product_{prod_id}")])
     keyboard.append([InlineKeyboardButton("🔙 BACK TO ADMIN", callback_data="admin_panel")])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1086,11 +1121,10 @@ async def addproduct(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         args = context.args
-        if len(args) < 8:
+        if len(args) < 7:
             await update.message.reply_text(
-                "Usage: /addproduct <folder_id> <name> <display> <price1day> <price7days> <price30days> <pricefull> <apk_link>\n\n"
-                "Example: /addproduct 1 bgmi_key 'BGMI Key' 100 500 1200 2500 'https://example.com/apk'\n"
-                "Use empty string '' for no APK link."
+                "Usage: /addproduct <folder_id> <name> <display> <price1day> <price7days> <price30days> <pricefull>\n\n"
+                "Example: /addproduct 1 bgmi_key 'BGMI Key' 100 500 1200 2500"
             )
             return
         folder_id = int(args[0])
@@ -1100,9 +1134,8 @@ async def addproduct(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price_7days = float(args[4])
         price_30days = float(args[5])
         price_full = float(args[6])
-        apk_link = args[7] if len(args) > 7 else ""
-        if add_product(folder_id, name, display_name, price_1day, price_7days, price_30days, price_full, apk_link):
-            await update.message.reply_text(f"✅ Product added: {display_name}\nAPK link: {apk_link if apk_link else 'None'}")
+        if add_product(folder_id, name, display_name, price_1day, price_7days, price_30days, price_full):
+            await update.message.reply_text(f"✅ Product added: {display_name}\nUse Admin Panel to upload APK file.")
         else:
             await update.message.reply_text("❌ Failed to add product!")
     except Exception as e:
@@ -1122,37 +1155,6 @@ async def editproduct(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price = float(args[2])
         update_product_price(product_id, duration, price)
         await update.message.reply_text(f"✅ Product #{product_id} {duration} price updated to ₹{price}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def setapk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ Only owner can use this command.")
-        return
-    try:
-        args = context.args
-        if len(args) < 2:
-            await update.message.reply_text("Usage: /setapk <product_id> <apk_link>\n\nExample: /setapk 1 'https://example.com/app.apk'")
-            return
-        product_id = int(args[0])
-        apk_link = ' '.join(args[1:])
-        set_product_apk_link(product_id, apk_link)
-        await update.message.reply_text(f"✅ APK link for product #{product_id} set to:\n{apk_link}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def delapk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ Only owner can use this command.")
-        return
-    try:
-        args = context.args
-        if len(args) < 1:
-            await update.message.reply_text("Usage: /delapk <product_id>")
-            return
-        product_id = int(args[0])
-        set_product_apk_link(product_id, "")
-        await update.message.reply_text(f"✅ APK link removed for product #{product_id}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
@@ -1250,7 +1252,7 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         order_id = int(args[0])
         key = args[1]
-        success, user_id, apk_link = approve_order(order_id, key)
+        success, user_id, apk_file_id = approve_order(order_id, key)
         if success:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -1269,10 +1271,15 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"│ 📅 {duration_name}\n"
                     f"│ 🔑 <code>{key}</code>\n"
                 )
-                if apk_link:
-                    message += f"│ 📲 <a href='{apk_link}'>Download APK</a>\n"
-                message += f"└────────────────────────────┘\n\nThank you for your purchase! 🎮"
-                await context.bot.send_message(user_id, message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                await context.bot.send_message(user_id, message, parse_mode=ParseMode.HTML)
+                # Send APK file if exists
+                if apk_file_id:
+                    try:
+                        await context.bot.send_document(user_id, apk_file_id, caption="📲 Download APK")
+                    except Exception as e:
+                        await context.bot.send_message(user_id, f"⚠️ Could not send APK file. Error: {e}")
+                else:
+                    await context.bot.send_message(user_id, "ℹ️ No APK file attached to this product.")
                 await update.message.reply_text(f"✅ Order #{order_id} approved and key sent!")
             else:
                 await update.message.reply_text(f"✅ Order #{order_id} approved!")
@@ -1346,7 +1353,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 4️⃣ Scan QR or pay to UPI: <code>{UPI_ID}</code>
 5️⃣ Send screenshot
 6️⃣ Wait for approval
-7️⃣ Get your key + APK link!
+7️⃣ Get your key + APK file (if provided by admin)
 
 <b>My Keys</b> - View all your approved keys
 <b>Delete Key</b> - Request admin to delete a key
@@ -1361,11 +1368,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /delfolder &lt;id&gt;
 
 💰 <b>Products</b>
-/addproduct &lt;folder_id&gt; &lt;name&gt; &lt;display&gt; &lt;p1&gt; &lt;p7&gt; &lt;p30&gt; &lt;pfull&gt; &lt;apk_link&gt;
+/addproduct &lt;folder_id&gt; &lt;name&gt; &lt;display&gt; &lt;p1&gt; &lt;p7&gt; &lt;p30&gt; &lt;pfull&gt;
 /editproduct &lt;id&gt; &lt;duration&gt; &lt;price&gt;
-/setapk &lt;product_id&gt; &lt;link&gt;
-/delapk &lt;product_id&gt;
 /delproduct &lt;id&gt;
+Use Admin Panel to upload/remove APK files.
 
 🔑 <b>Keys</b>
 /addkey &lt;product_id&gt; &lt;duration&gt; &lt;key&gt;
@@ -1449,6 +1455,31 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(DB_FILE, "rb") as f:
         await update.message.reply_document(document=InputFile(f, filename="panel_bot_backup.db"), caption="💾 Database backup")
 
+# ==================== HANDLE APK UPLOAD ====================
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Only owner can upload APK files.")
+        return
+    
+    product_id = context.user_data.get('upload_apk_for_product')
+    if not product_id:
+        await update.message.reply_text("❌ No product selected for APK upload. Use Admin Panel -> Manage Products -> Upload APK button first.")
+        return
+    
+    document = update.message.document
+    if not document:
+        await update.message.reply_text("❌ Please send a valid document (APK file).")
+        return
+    
+    file_id = document.file_id
+    file_name = document.file_name or "app.apk"
+    if not file_name.endswith('.apk'):
+        await update.message.reply_text("⚠️ File does not have .apk extension. Still saving, but ensure it's an APK.")
+    
+    set_product_apk_file(product_id, file_id)
+    await update.message.reply_text(f"✅ APK file '{file_name}' uploaded successfully for product ID {product_id}.")
+    context.user_data['upload_apk_for_product'] = None
+
 # ==================== MAIN ====================
 def main():
     init_database()
@@ -1466,8 +1497,6 @@ def main():
     application.add_handler(CommandHandler("delfolder", delfolder))
     application.add_handler(CommandHandler("addproduct", addproduct))
     application.add_handler(CommandHandler("editproduct", editproduct))
-    application.add_handler(CommandHandler("setapk", setapk))
-    application.add_handler(CommandHandler("delapk", delapk))
     application.add_handler(CommandHandler("delproduct", delproduct))
     application.add_handler(CommandHandler("addkey", addkey))
     application.add_handler(CommandHandler("listkeys", listkeys))
@@ -1482,11 +1511,12 @@ def main():
     # Handlers
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     print("🤖 Bot Started!")
     print(f"👑 Owner ID: {OWNER_ID}")
     print(f"💰 UPI: {UPI_ID}")
-    print("✅ All features: QR, reset/delete admin buttons, broadcast, stats, backup, APK links")
+    print("✅ APK link removed, replaced with file upload system.")
     
     application.run_polling()
 
