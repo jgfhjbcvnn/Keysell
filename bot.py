@@ -619,7 +619,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reset_key_selection(query, user.id)
     elif data.startswith("delkey_"):
         key_value = data.replace("delkey_", "")
-        # Send delete request to admin
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute('''
@@ -1398,7 +1397,6 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if update.message.reply_to_message:
-        # Forward the replied message exactly
         original = update.message.reply_to_message
         users = get_all_users()
         sent = 0
@@ -1488,7 +1486,7 @@ def main():
     print("🤖 Bot Started!")
     print(f"👑 Owner ID: {OWNER_ID}")
     print(f"💰 UPI: {UPI_ID}")
-    print("✅ All features: QR, reset/delete with admin buttons, broadcast, stats, backup")
+    print("✅ All features: QR, reset/delete admin buttons, broadcast, stats, backup, APK links")
     
     application.run_polling()
 
